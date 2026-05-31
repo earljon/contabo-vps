@@ -5,6 +5,7 @@
 # Rendered secrets:
 #   ${AWS_ACCESS_KEY_ID} ${AWS_SECRET_ACCESS_KEY} ${AWS_REGION}
 #   ${CLOUDFLARED_TUNNEL_TOKEN} ${SLACK_WEBHOOK_URL} ${SSH_PUBLIC_KEY}
+#   ${COOLIFY_INITIAL_EMAIL} ${COOLIFY_INITIAL_PASSWORD}
 # ============================================================================
 
 hostname: <%= hostname %>
@@ -226,6 +227,7 @@ write_files:
       echo ""
       echo "  Host:         $(hostname -f)"
       echo "  SSH:          ssh -p 2219 contabo@$(hostname -f)"
+      echo "  Coolify:      https://coolify.acacialabs.com"
       echo "  Cloudflared:  systemctl status cloudflared"
       echo "  CrowdSec:     sudo cscli metrics"
       echo "  Setup status: cloud-init status --long"
@@ -364,6 +366,30 @@ write_files:
         /usr/local/bin/slack-notify INFO "Docker + unattended-upgrades enabled"
       }
 
+      # ── Stage: Coolify install + initial admin ────────────────────────────────
+      stage_coolify() {
+        curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash
+
+        # Wait for Coolify HTTP to become healthy (up to 120 s)
+        local i=0
+        until curl -sf http://localhost:8000/api/health >/dev/null 2>&1; do
+          i=$((i + 1))
+          if [ "$i" -ge 24 ]; then
+            /usr/local/bin/slack-notify ERROR "Coolify did not become healthy after 120 s"
+            return 1
+          fi
+          sleep 5
+        done
+
+        # Register initial admin (only succeeds while no admin exists)
+        curl -sf -X POST http://localhost:8000/api/v1/register \
+          -H 'Content-Type: application/json' \
+          -d "{\"name\":\"Admin\",\"email\":\"${COOLIFY_INITIAL_EMAIL}\",\"password\":\"${COOLIFY_INITIAL_PASSWORD}\",\"password_confirmation\":\"${COOLIFY_INITIAL_PASSWORD}\"}" \
+          >/dev/null 2>&1 || true
+
+        /usr/local/bin/slack-notify INFO "Coolify installed + admin registered — add coolify.acacialabs.com in CF Zero Trust after bootstrap"
+      }
+
       # ── Stage: cloudflared tunnel (token) ─────────────────────────────────────
       stage_cloudflared() {
         mkdir -p --mode=0755 /usr/share/keyrings
@@ -400,6 +426,7 @@ write_files:
       run_stage "Stage: ssh/sysctl"      stage_hardening
       run_stage "Stage: CrowdSec"        stage_crowdsec
       run_stage "Stage: docker/upgrades" stage_services
+      run_stage "Stage: Coolify"         stage_coolify
       run_stage "Stage: cloudflared"     stage_cloudflared
       run_stage "Stage: lockout guard"   stage_lockout_guard
       /usr/local/bin/slack-notify SUCCESS "cloud-init bootstrap COMPLETE — ssh -p 2219 contabo@$(hostname -f)"

@@ -1,6 +1,6 @@
 # contabo-vps
 
-A `cloud-init` configuration for bootstrapping a **Contabo VPS** running **Ubuntu 24.04 LTS** with Docker, security hardening, AWS CLI, Cloudflare Tunnel, CrowdSec, and Slack notifications.
+A `cloud-init` configuration for bootstrapping a **Contabo VPS** running **Ubuntu 24.04 LTS** with Docker, security hardening, AWS CLI, Cloudflare Tunnel, CrowdSec, Coolify (self-hosted PaaS), and Slack notifications.
 
 ---
 
@@ -12,6 +12,7 @@ A `cloud-init` configuration for bootstrapping a **Contabo VPS** running **Ubunt
 - [How to Generate Each Secret](#how-to-generate-each-secret)
 - [Rendering the Template](#rendering-the-template)
 - [Usage with Contabo](#usage-with-contabo)
+- [Cloudflare Configuration](#cloudflare-configuration)
 - [Post-Bootstrap Verification](#post-bootstrap-verification)
 - [Firewall & Ports](#firewall--ports)
 - [Troubleshooting](#troubleshooting)
@@ -28,6 +29,7 @@ A `cloud-init` configuration for bootstrapping a **Contabo VPS** running **Ubunt
 | **Kernel** | sysctl network hardening (SYN flood, ICMP, IP spoofing, IP forwarding for Docker) |
 | **Docker** | Installs Docker CE from official apt repo, enables on boot |
 | **AWS CLI** | Installs AWS CLI v2, writes credentials for both `root` and `contabo` |
+| **Coolify** | Installs Coolify PaaS, registers initial admin account, accessible at `coolify.acacialabs.com` |
 | **Cloudflare Tunnel** | Installs `cloudflared`, registers tunnel via token, starts as a system service |
 | **CrowdSec** | Installs agent + iptables bouncer for intrusion prevention |
 | **Unattended Upgrades** | Auto-patches OS security updates, auto-reboots at 04:00 |
@@ -48,8 +50,9 @@ The `bootstrap.sh` script runs as a single bash process with per-stage error rep
 4. SSH / sysctl      — apply sshd drop-ins, socket port override, kernel params
 5. CrowdSec          — install agent + iptables bouncer, enable services
 6. Docker / upgrades — enable docker.service + unattended-upgrades.service
-7. cloudflared       — install package, register tunnel token, start service
-8. Lockout guard     — verify SSH keys exist; revert to port 22 if empty (failsafe)
+7. Coolify           — install Coolify, wait for healthy, register initial admin via API
+8. cloudflared       — install package, register tunnel token, start service
+9. Lockout guard     — verify SSH keys exist; revert to port 22 if empty (failsafe)
 →  Reboot            — final reboot to apply kernel/network changes
 ```
 
@@ -68,6 +71,8 @@ The template uses two kinds of placeholders:
 | `${AWS_REGION}` | Shell variable | AWS region (e.g. `ap-southeast-1`) |
 | `${CLOUDFLARED_TUNNEL_TOKEN}` | Shell variable | Cloudflare Zero Trust tunnel token |
 | `${SLACK_WEBHOOK_URL}` | Shell variable | Slack incoming webhook URL |
+| `${COOLIFY_INITIAL_EMAIL}` | Shell variable | Email address for the first Coolify admin account |
+| `${COOLIFY_INITIAL_PASSWORD}` | Shell variable | Password for the first Coolify admin account |
 
 ---
 
@@ -147,6 +152,21 @@ Use this as `SLACK_WEBHOOK_URL`. The bootstrap will post INFO/SUCCESS/ERROR mess
 
 ---
 
+### `COOLIFY_INITIAL_EMAIL` + `COOLIFY_INITIAL_PASSWORD`
+
+These are the credentials for the **first admin account** on your Coolify dashboard. The bootstrap registers them automatically via the Coolify API immediately after installation (the registration endpoint is only available while no admin exists).
+
+Choose any email/password combination:
+
+```
+COOLIFY_INITIAL_EMAIL=admin@acacialabs.com
+COOLIFY_INITIAL_PASSWORD=ChangeMeAfterFirstLogin!
+```
+
+> **Security:** Use a strong password (16+ chars, mixed case, symbols). Change it after your first login at `https://coolify.acacialabs.com`. These values are embedded in the rendered cloud-init YAML — treat the rendered file as a secret.
+
+---
+
 ## Rendering the Template
 
 The `cloud-init.yaml` file uses two template syntaxes that must be resolved before uploading:
@@ -164,6 +184,8 @@ export AWS_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 export AWS_REGION="ap-southeast-1"
 export CLOUDFLARED_TUNNEL_TOKEN="eyJ..."
 export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+export COOLIFY_INITIAL_EMAIL="admin@acacialabs.com"
+export COOLIFY_INITIAL_PASSWORD="ChangeMeAfterFirstLogin!"
 
 # Replace hostname placeholder (ERB-style) manually, then run envsubst
 HOSTNAME="my-vps-01"
@@ -173,7 +195,7 @@ sed "s/<%= hostname %>/${HOSTNAME}/g" cloud-init.yaml \
 
 > **Important:** `envsubst` will also expand `${distro_id}` and `${distro_codename}` in the unattended-upgrades block. To protect those, enumerate only the variables you want substituted:
 > ```bash
-> envsubst '${SSH_PUBLIC_KEY} ${AWS_ACCESS_KEY_ID} ${AWS_SECRET_ACCESS_KEY} ${AWS_REGION} ${CLOUDFLARED_TUNNEL_TOKEN} ${SLACK_WEBHOOK_URL}' \
+> envsubst '${SSH_PUBLIC_KEY} ${AWS_ACCESS_KEY_ID} ${AWS_SECRET_ACCESS_KEY} ${AWS_REGION} ${CLOUDFLARED_TUNNEL_TOKEN} ${SLACK_WEBHOOK_URL} ${COOLIFY_INITIAL_EMAIL} ${COOLIFY_INITIAL_PASSWORD}' \
 >   < cloud-init.yaml > cloud-init-rendered.yaml
 > ```
 
@@ -190,10 +212,12 @@ Store all secrets in **GitHub → Settings → Secrets and variables → Actions
     AWS_REGION: ${{ secrets.AWS_REGION }}
     CLOUDFLARED_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARED_TUNNEL_TOKEN }}
     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    COOLIFY_INITIAL_EMAIL: ${{ secrets.COOLIFY_INITIAL_EMAIL }}
+    COOLIFY_INITIAL_PASSWORD: ${{ secrets.COOLIFY_INITIAL_PASSWORD }}
     HOSTNAME: my-vps-01
   run: |
     sed "s/<%= hostname %>/${HOSTNAME}/g" cloud-init.yaml \
-      | envsubst '${SSH_PUBLIC_KEY} ${AWS_ACCESS_KEY_ID} ${AWS_SECRET_ACCESS_KEY} ${AWS_REGION} ${CLOUDFLARED_TUNNEL_TOKEN} ${SLACK_WEBHOOK_URL}' \
+      | envsubst '${SSH_PUBLIC_KEY} ${AWS_ACCESS_KEY_ID} ${AWS_SECRET_ACCESS_KEY} ${AWS_REGION} ${CLOUDFLARED_TUNNEL_TOKEN} ${SLACK_WEBHOOK_URL} ${COOLIFY_INITIAL_EMAIL} ${COOLIFY_INITIAL_PASSWORD}' \
       > cloud-init-rendered.yaml
 ```
 
@@ -216,11 +240,123 @@ grep -E '\$\{[A-Z_]+\}|<%=' cloud-init-rendered.yaml
 4. Paste the full contents of `cloud-init-rendered.yaml` into that field.
 5. Confirm and start the installation.
 
-Cloud-init runs on first boot. Bootstrap takes approximately **3–6 minutes** depending on package download speed. You will receive Slack notifications as each stage completes.
+Cloud-init runs on first boot. Bootstrap takes approximately **5–10 minutes** depending on package download speed (Coolify pulls several Docker images). You will receive Slack notifications as each stage completes.
+
+---
+
+## Cloudflare Configuration
+
+These steps are performed **once after the VPS bootstrap completes**. They configure the Cloudflare side so that `https://coolify.acacialabs.com` resolves correctly and reaches your Coolify dashboard from any machine (including your Mac).
+
+> **Prerequisites:** `acacialabs.com` must be added to your Cloudflare account as an active zone, and the Cloudflare Tunnel must have been created before bootstrap (the token was used in cloud-init).
+
+---
+
+### Step 1 — Add the Tunnel Public Hostname
+
+This is what routes `coolify.acacialabs.com` through the encrypted tunnel to Coolify on the VPS.
+
+1. Go to [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → **Networks → Tunnels**.
+2. Click your tunnel (the one whose token you used in `CLOUDFLARED_TUNNEL_TOKEN`).
+3. Click the **Public Hostnames** tab → **Add a public hostname**.
+4. Fill in:
+
+   | Field | Value |
+   |---|---|
+   | Subdomain | `coolify` |
+   | Domain | `acacialabs.com` |
+   | Type | `HTTP` |
+   | URL | `localhost:8000` |
+
+5. Leave all other fields at their defaults and click **Save hostname**.
+
+Cloudflare automatically creates a DNS CNAME record for `coolify.acacialabs.com` pointing to your tunnel's `.cfargotunnel.com` address. You do not need to create it manually.
+
+---
+
+### Step 2 — Verify the DNS Record
+
+Confirm the CNAME was created:
+
+1. Go to [Cloudflare Dashboard](https://dash.cloudflare.com/) → **acacialabs.com → DNS → Records**.
+2. You should see:
+
+   | Type | Name | Content | Proxy |
+   |---|---|---|---|
+   | CNAME | `coolify` | `<uuid>.cfargotunnel.com` | Proxied (orange cloud) |
+
+3. If the proxy toggle is **grey (DNS only)**, click the cloud icon to enable **Proxied** (orange cloud). This is required — the tunnel only works through Cloudflare's proxy.
+
+---
+
+### Step 3 — Set SSL/TLS Encryption Mode
+
+This prevents `ERR_TOO_MANY_REDIRECTS` and ensures HTTPS works end-to-end.
+
+1. Go to **Cloudflare Dashboard → acacialabs.com → SSL/TLS → Overview**.
+2. Set the encryption mode to **Full**.
+
+   | Mode | Result |
+   |---|---|
+   | Off | HTTP only — do not use |
+   | Flexible | HTTPS to Cloudflare, HTTP to origin — can cause redirect loops with Coolify |
+   | **Full** ✓ | HTTPS to Cloudflare, tunnel to origin — correct for Cloudflare Tunnel |
+   | Full (Strict) | Requires a valid CA cert on the origin — not needed since the tunnel handles encryption |
+
+> **Why Full, not Full (Strict)?** The Cloudflare Tunnel's mTLS connection between `cloudflared` and Cloudflare's edge already provides end-to-end encryption. The origin (`localhost:8000`) only needs to serve HTTP — Full mode covers this without requiring an origin certificate.
+
+---
+
+### Step 4 — Enable "Always Use HTTPS"
+
+This redirects any `http://coolify.acacialabs.com` requests to HTTPS automatically.
+
+1. Go to **SSL/TLS → Edge Certificates**.
+2. Toggle **Always Use HTTPS** → **On**.
+
+---
+
+### Step 5 — Verify from Your Mac
+
+Once the tunnel is connected and DNS has propagated (usually instant with Cloudflare):
+
+```bash
+# 1. Check DNS resolves to a Cloudflare IP (not your VPS IP)
+dig coolify.acacialabs.com +short
+# Expected: one or more Cloudflare IPs (e.g. 104.x.x.x)
+
+# 2. Confirm HTTPS responds
+curl -I https://coolify.acacialabs.com
+# Expected: HTTP/2 200 (or 302 redirect to /login)
+
+# 3. Check the tunnel status on the VPS
+ssh -i ~/.ssh/contabo_ed25519 -p 2219 contabo@<your-server-ip> \
+  "systemctl is-active cloudflared && curl -sf http://localhost:8000/api/health"
+```
+
+Then open your browser:
+```
+https://coolify.acacialabs.com
+```
+
+You should see the Coolify login page. Log in with `COOLIFY_INITIAL_EMAIL` and `COOLIFY_INITIAL_PASSWORD`.
+
+---
+
+### Cloudflare Configuration Checklist
+
+- [ ] Tunnel public hostname added: `coolify.acacialabs.com` → `http://localhost:8000`
+- [ ] DNS CNAME exists and proxy is **orange (Proxied)**
+- [ ] SSL/TLS mode set to **Full**
+- [ ] Always Use HTTPS **On**
+- [ ] `dig coolify.acacialabs.com` returns a Cloudflare IP
+- [ ] `https://coolify.acacialabs.com` loads in the browser
 
 ---
 
 ## Post-Bootstrap Verification
+
+### Step 1 — SSH in and verify components
 
 SSH in once the SUCCESS Slack message arrives:
 
@@ -242,6 +378,13 @@ docker info
 
 # AWS CLI
 aws sts get-caller-identity
+
+# Coolify service
+systemctl status coolify
+curl -sf http://localhost:8000/api/health
+
+# Traefik (started by Coolify automatically)
+docker ps | grep traefik
 
 # Cloudflared tunnel
 systemctl status cloudflared
@@ -290,6 +433,61 @@ The lockout guard (`stage_lockout_guard`) detects empty `authorized_keys` on bot
 **`envsubst` expands `${distro_id}`:**
 
 Always pass the explicit variable list to `envsubst` (see Option A above) so distro-specific APT variables in the unattended-upgrades config are not accidentally blanked out.
+
+**Coolify did not become healthy (timeout after 120 s):**
+
+The `stage_coolify` health check polls `http://localhost:8000/api/health` every 5 seconds for up to 2 minutes. If it times out, check:
+```bash
+sudo journalctl -u coolify -n 50
+docker ps -a   # look for exited containers
+cat /var/log/cloud-init-output.log | grep -A5 "Stage: Coolify"
+```
+
+**Coolify admin registration failed:**
+
+The `/api/v1/register` call is fire-and-forget (`|| true`) so bootstrap does not halt if it fails. If you cannot log in:
+```bash
+# Re-attempt registration manually (only works while no admin exists)
+curl -X POST http://localhost:8000/api/v1/register \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Admin","email":"you@example.com","password":"yourpassword","password_confirmation":"yourpassword"}'
+```
+
+**`https://coolify.acacialabs.com` shows ERR_TOO_MANY_REDIRECTS:**
+
+SSL/TLS mode is set to **Flexible** instead of **Full**. Coolify redirects HTTP → HTTPS internally, Cloudflare redirects HTTPS → HTTP under Flexible mode, creating a loop. Fix: Cloudflare Dashboard → acacialabs.com → SSL/TLS → set to **Full**.
+
+**`https://coolify.acacialabs.com` shows a 522 (Connection Timed Out) or 1033 error:**
+
+The tunnel is not connected. On the VPS:
+```bash
+systemctl status cloudflared
+journalctl -u cloudflared -n 30
+```
+If the service is down, restart it: `sudo systemctl restart cloudflared`. If it shows `ERR_FAILED_TO_DIAL_TUNNEL`, the tunnel token may be invalid — re-check `CLOUDFLARED_TUNNEL_TOKEN`.
+
+**`https://coolify.acacialabs.com` shows a 502 Bad Gateway:**
+
+The tunnel is connected but Coolify is not running on port 8000. On the VPS:
+```bash
+systemctl status coolify
+curl -sf http://localhost:8000/api/health
+docker ps   # all Coolify containers should be Up
+```
+Restart if needed: `sudo systemctl restart coolify`.
+
+**DNS does not resolve / `dig` returns NXDOMAIN:**
+
+The public hostname was not saved in Cloudflare Zero Trust, or DNS has not propagated. Check:
+```bash
+dig coolify.acacialabs.com +short
+# Expected: Cloudflare IP like 104.x.x.x
+```
+If empty, re-add the public hostname in Zero Trust → Tunnels → your tunnel → Public Hostnames. Cloudflare DNS propagation is usually under 30 seconds.
+
+**Browser shows "Your connection is not private" (SSL warning):**
+
+The proxy status on the DNS record is **grey (DNS only)** instead of **orange (Proxied)**. Go to Cloudflare Dashboard → acacialabs.com → DNS, find the `coolify` CNAME record, and click the cloud icon to make it orange.
 
 **Slack not notifying:**
 
